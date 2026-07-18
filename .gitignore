@@ -1,0 +1,20 @@
+# Wordlists
+wordlists/*
+!wordlists/.gitkeep
+
+# Captures and temp files
+*.cap
+*.csv
+*.hc22000
+scan_temp*
+capture*
+
+# Generated reports
+report*.json
+report*.html
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
