@@ -1,101 +1,134 @@
-
 import re
-import shutil
 import subprocess
+import time
 import logging
+import shutil
+from typing import Optional, Tuple, List
 
 logger = logging.getLogger(__name__)
 
-REQUIRED_TOOLS = ["airmon-ng", "airodump-ng", "aireplay-ng", "aircrack-ng"]
-OPTIONAL_TOOLS = ["hashcat", "hcxpcapngtool"]
+REQUIRED_TOOLS = ["iw", "rfkill", "airodump-ng", "aireplay-ng", "aircrack-ng", "iwconfig"]
+OPTIONAL_TOOLS = ["hashcat", "hcxpcapngtool", "sed", "awk"]
 
+SUBPROCESS_TIMEOUT = 15
+COOLDOWN_DELAY = 2
 
-def list_wireless_interfaces() -> list[str]:
-    try:
-        result = subprocess.run(
-            ["iw", "dev"], capture_output=True, text=True, check=True
-        )
-    except FileNotFoundError:
-        logger.error("`iw` not found. Install it with: sudo apt install iw")
-        return []
-    except subprocess.CalledProcessError as e:
-        logger.error("Failed to list interfaces: %s", e.stderr)
-        return []
+def list_wireless_interfaces() -> List[str]:
+    interfaces = []
+    cmd = ["iw", "dev"]
+    result = _run_subprocess(cmd, capture_output=True, text=True, timeout=5)
 
-    interfaces = re.findall(r"Interface\s+(\S+)", result.stdout)
-    logger.info("Found wireless interfaces: %s", interfaces)
+    if result.returncode != 0:
+        logger.error("Falha ao listar interfaces: %s", result.stderr)
+        return interfaces
+
+    pattern = re.compile(r"Interface\s+(\w+)(?!\s*(eth|lo|docker|wlan\d+wds))")
+    interfaces = re.findall(pattern, result.stdout)
+    logger.info("Interfaces wireless detectadas: %s", interfaces)
     return interfaces
 
+def enable_monitor_mode(interface: str, retries: int = 2) -> str:
+    if not interface or not isinstance(interface, str):
+        raise ValueError("interface é obrigatório e deve ser string")
 
-def enable_monitor_mode(interface: str) -> str:
+    _rfkill_unblock()
 
-    logger.info("Killing conflicting processes (airmon-ng check kill)...")
-    try:
-        subprocess.run(
-            ["airmon-ng", "check", "kill"],
-            capture_output=True, text=True, check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        # Not fatal - some setups don't have conflicting processes running
-        logger.warning("airmon-ng check kill returned a warning: %s", e.stderr)
-    except FileNotFoundError:
-        raise RuntimeError("airmon-ng not found. Is the aircrack-ng suite installed?")
+    for attempt in range(retries):
+        logger.info("Tentativa %s/%s: ativando modo monitor em %s", attempt+1, retries, interface)
 
-    logger.info("Starting monitor mode on %s...", interface)
-    try:
-        result = subprocess.run(
-            ["airmon-ng", "start", interface],
-            capture_output=True, text=True, check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to start monitor mode: {e.stderr}")
+        _kill_conflicting_processes()
 
+        cmd = ["iw", "interface", "set", "type", "monitor"]
+        _run_subprocess(cmd, timeout=8, cwd=None)
 
-    match = re.search(r"monitor mode.*?enabled.*?\[?(\w*mon\w*)\]?", result.stdout, re.IGNORECASE)
-    if match:
-        monitor_interface = match.group(1)
-    else:
+        monitor_iface = _detect_monitor_interface(interface)
+        if monitor_iface:
+            logger.info("Modo monitor ativado: %s", monitor_iface)
+            return monitor_iface
 
-        monitor_interface = f"{interface}mon"
-        logger.warning(
-            "Could not parse the monitor interface name from airmon-ng output; "
-            "assuming '%s'. Verify with `iw dev`.", monitor_interface
-        )
+        if attempt < retries - 1:
+            time.sleep(COOLDOWN_DELAY)
+            continue
 
-    logger.info("Monitor mode enabled: %s", monitor_interface)
-    return monitor_interface
-
+    monitor_iface = f"{interface}mon"
+    logger.warning("Fallback: assumindo monitor interface = %s", monitor_iface)
+    return monitor_iface
 
 def disable_monitor_mode(monitor_interface: str) -> None:
+    if not monitor_interface:
+        logger.error("interface vazio: nada a desabilitar")
+        return
 
-    logger.info("Disabling monitor mode on %s...", monitor_interface)
-    try:
-        subprocess.run(
-            ["airmon-ng", "stop", monitor_interface],
-            capture_output=True, text=True, check=True,
-        )
-        logger.info("Monitor mode disabled.")
-    except subprocess.CalledProcessError as e:
-        logger.error("Failed to disable monitor mode cleanly: %s", e.stderr)
-    except FileNotFoundError:
-        logger.error("airmon-ng not found.")
+    cmd = ["iw", "interface", "set", "type", "managed"]
+    _run_subprocess(cmd, timeout=5)
 
+    logger.info("Modo monitor desativado em %s", monitor_interface)
 
 def check_dependencies() -> bool:
+    missing_required = []
+    missing_optional = []
 
-    missing_required = [t for t in REQUIRED_TOOLS if shutil.which(t) is None]
-    missing_optional = [t for t in OPTIONAL_TOOLS if shutil.which(t) is None]
+    for tool in REQUIRED_TOOLS:
+        if not _which(tool):
+            missing_required.append(tool)
 
-    if missing_optional:
-        logger.warning(
-            "Optional tools not found (some features will be unavailable): %s",
-            missing_optional,
-        )
+    for tool in OPTIONAL_TOOLS:
+        if not _which(tool):
+            missing_optional.append(tool)
 
     if missing_required:
-        logger.error("Missing required tools: %s", missing_required)
-        logger.error("Install the aircrack-ng suite: sudo apt install aircrack-ng")
+        logger.error("Ferramentas obrigatórias ausentes: %s", missing_required)
+        logger.error("Instale pacote aircrack-ng: sudo apt update && sudo apt install -y aircrack-ng")
         return False
 
-    logger.info("All required dependencies are installed.")
+    if missing_optional:
+        msg = "Ferramentas opcionais ausentes (algumas features desabilitadas): %s"
+        logger.warning(msg, missing_optional)
+
+    logger.info("Dependências validadas.")
     return True
+
+def _run_subprocess(cmd: List[str], timeout: int = SUBPROCESS_TIMEOUT,
+                capture_output: bool = True, cwd: Optional[str] = None) -> subprocess.CompletedProcess:
+    result = subprocess.run(
+        cmd,
+        capture_output=capture_output,
+        text=True,
+        timeout=timeout,
+        cwd=cwd,
+        check=False
+    )
+    if result.returncode != 0:
+        logger.error("Comando falhou (%s): %s\nstderr: %s",
+                    result.returncode, " ".join(cmd), result.stderr)
+    return result
+
+def _which(tool: str) -> bool:
+    found = shutil.which(tool) is not None
+    if not found:
+        logger.debug("Ferramenta não encontrada no PATH: %s", tool)
+    return found
+
+def _rfkill_unblock() -> None:
+    cmd = ["rfkill", "unblock", "all"]
+    _run_subprocess(cmd, timeout=3)
+
+def _kill_conflicting_processes() -> None:
+    for proc in ["NetworkManager", "wpa_supplicant", "dhclient"]:
+        cmd = ["pkill", "-9", proc]
+        _run_subprocess(cmd, timeout=3, cwd=None)
+
+def _detect_monitor_interface(base_iface: str) -> Optional[str]:
+    cmd = ["iw", base_iface, "info"]
+    result = _run_subprocess(cmd, timeout=5)
+
+    if result.returncode != 0:
+        logger.error("Falha ao detectar interface monitor em %s", base_iface)
+        return None
+
+    match = re.search(r"type\s+Monitor\s+channel\s+(\d+)", result.stdout, re.IGNORECASE)
+    if not match:
+        logger.error("Interface %s não está no modo monitor", base_iface)
+        return None
+
+    return base_iface
