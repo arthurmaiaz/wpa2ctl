@@ -4,7 +4,11 @@ wordlists/*
 *.csv
 *.hc22000
 scan_temp*
-capture*
+capture_*
+capture_temp*
+capture_output*
+
+# Generated reports
 report*.json
 report*.html
 __pycache__/
