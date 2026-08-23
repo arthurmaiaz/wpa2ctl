@@ -1,8 +1,5 @@
-# Wordlists
 wordlists/*
 !wordlists/.gitkeep
-
-# Captures and temp files
 *.cap
 *.csv
 *.hc22000
@@ -14,8 +11,6 @@ capture_output*
 # Generated reports
 report*.json
 report*.html
-
-# Python
 __pycache__/
 *.pyc
 .venv/
