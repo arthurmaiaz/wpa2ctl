@@ -1,8 +1,3 @@
-"""
-report.py
-Builds and saves the WPA2 audit report (JSON and HTML).
-"""
-
 import json
 import logging
 from dataclasses import dataclass, asdict
