@@ -7,6 +7,7 @@ scan_temp*
 capture_*
 capture_temp*
 capture_output*
+.idea/
 
 # Generated reports
 report*.json
