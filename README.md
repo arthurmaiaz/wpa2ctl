@@ -1,6 +1,6 @@
 # wpa2ctl
 
-A CLI tool that orchestrates the full WPA2 auditing workflow — network scanning, handshake capture, and password strength testing — automating the manual process normally done with `airodump-ng`, `aircrack-ng`, and `hashcat`.
+A CLI tool that orchestrates the full WPA2 auditing workflow network scanning, handshake capture, and password strength testing automating the manual process normally done with `airodump-ng`, `aircrack-ng`, and `hashcat`.
 
 > ⚠️ **Strictly for educational use in authorized environments.** See [legal_notice.md](legal_notice.md) before using.
 
